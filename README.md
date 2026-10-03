@@ -23,6 +23,8 @@ Two ways to use it:
 - **Simulation.** `caseagent simulate CASE` has the agent play every remaining phase
   for both sides, one turn at a time, then submits the case and reports the award.
 
+![caseagent simulate saas-outage --dry-run: four phases written by claude-opus-5.5, with per-call token counts and cost](docs/demo.png)
+
 Every argument is the agent's. DecisionLayer's sample disputes are ingested as the
 dispute only; the sample authors' arguments are never read by the agent or sent
 anywhere (they are saved to `sample-arguments.md` purely for you to compare against).
