@@ -1,6 +1,8 @@
 import ast
 import json
+import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import HUMAN_TEXT, Stage
@@ -11,6 +13,13 @@ from caseagent.core.thread import ThreadStore
 
 runner = CliRunner()
 SRC = Path(__file__).resolve().parents[1] / "src" / "caseagent"
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def invoke(args: list[str], **kwargs) -> SimpleNamespace:
+    """Run the CLI and return its exit code and output with any terminal styling removed."""
+    result = runner.invoke(app, args, **kwargs)
+    return SimpleNamespace(exit_code=result.exit_code, output=ANSI_RE.sub("", result.output))
 
 
 def test_core_does_not_depend_on_api_or_model_implementations():
@@ -66,26 +75,26 @@ def env(case_bundle, tmp_path, monkeypatch):
     monkeypatch.setenv("CASEAGENT_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("DECISIONLAYER_API_KEY", raising=False)
     monkeypatch.setenv("COLUMNS", "200")  # keep Rich tables on one line
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.chdir(tmp_path)  # no stray .env
     return tmp_path
 
 
 def test_next_writes_one_filing_at_a_time(env, case_bundle):
     store = ThreadStore(case_bundle.root)
-    first = runner.invoke(
-        app, ["next", "lease", "-m", "fake:demo", "--depth", "quick", "--no-interview"]
-    )
+    first = invoke(["next", "lease", "-m", "fake:demo", "--depth", "quick", "--no-interview"])
     assert first.exit_code == 0, first.output
     assert "writing the Claim for BevMart Inc." in first.output
     assert [e.stage for e in store.entries()] == [Stage.CLAIM]
     assert store.entries()[0].model == "fake:demo"
 
-    second = runner.invoke(app, ["reply", "lease", "-m", "fake:demo", "--depth", "quick"])
+    second = invoke(["reply", "lease", "-m", "fake:demo", "--depth", "quick"])
     assert second.exit_code == 0, second.output
     assert "writing the Answer for Arcology LLC" in second.output
     assert [e.stage for e in store.entries()] == [Stage.CLAIM, Stage.ANSWER]
 
-    wrong = runner.invoke(app, ["start", "lease", "-m", "fake:demo", "--depth", "quick"])
+    wrong = invoke(["start", "lease", "-m", "fake:demo", "--depth", "quick"])
     assert wrong.exit_code == 1 and "already has a Answer" in wrong.output.replace(
         "an Answer", "a Answer"
     )
@@ -94,11 +103,11 @@ def test_next_writes_one_filing_at_a_time(env, case_bundle):
 def test_add_filing_then_next_replies_to_it(env, case_bundle, tmp_path):
     claim = tmp_path / "claim.txt"
     claim.write_text(HUMAN_TEXT[Stage.CLAIM])
-    added = runner.invoke(app, ["case", "add-filing", "lease", "claim", str(claim)])
+    added = invoke(["case", "add-filing", "lease", "claim", str(claim)])
     assert added.exit_code == 0, added.output
     assert "Recorded the Claim for BevMart Inc." in added.output
 
-    result = runner.invoke(app, ["next", "lease", "-m", "fake:demo", "--depth", "quick"])
+    result = invoke(["next", "lease", "-m", "fake:demo", "--depth", "quick"])
     assert result.exit_code == 0, result.output
     entries = ThreadStore(case_bundle.root).entries()
     assert [(e.stage, e.author.value) for e in entries] == [
@@ -109,7 +118,7 @@ def test_add_filing_then_next_replies_to_it(env, case_bundle, tmp_path):
     materials = (case_bundle.root / "work" / "2-answer" / "materials.txt").read_text()
     assert "HUMAN CLAIM" in materials
 
-    shown = runner.invoke(app, ["case", "show", "lease", "--full"])
+    shown = invoke(["case", "show", "lease", "--full"])
     assert (
         shown.exit_code == 0
         and "filed · human" in shown.output
@@ -120,10 +129,9 @@ def test_add_filing_then_next_replies_to_it(env, case_bundle, tmp_path):
 def test_simulate_dry_run_plays_both_sides_in_a_run_and_leaves_the_case(env, case_bundle, tmp_path):
     claim = tmp_path / "claim.txt"
     claim.write_text(HUMAN_TEXT[Stage.CLAIM])
-    runner.invoke(app, ["case", "add-filing", "lease", "claim", str(claim)])
+    invoke(["case", "add-filing", "lease", "claim", str(claim)])
 
-    result = runner.invoke(
-        app,
+    result = invoke(
         [
             "simulate",
             "lease",
@@ -154,18 +162,17 @@ def test_simulate_dry_run_plays_both_sides_in_a_run_and_leaves_the_case(env, cas
     # The case folder still has only the human Claim.
     assert [e.stage for e in ThreadStore(case_bundle.root).entries()] == [Stage.CLAIM]
 
-    shown = runner.invoke(app, ["show", "latest"])
+    shown = invoke(["show", "latest"])
     assert shown.exit_code == 0 and "## Claim: BevMart Inc. (claimant)" in shown.output
-    listed = runner.invoke(app, ["runs"])
+    listed = invoke(["runs"])
     assert listed.exit_code == 0 and "lease" in listed.output
 
 
 def test_simulate_through_answer_only_needs_the_respondent(env, case_bundle, tmp_path):
     claim = tmp_path / "claim.txt"
     claim.write_text(HUMAN_TEXT[Stage.CLAIM])
-    runner.invoke(app, ["case", "add-filing", "lease", "claim", str(claim)])
-    result = runner.invoke(
-        app,
+    invoke(["case", "add-filing", "lease", "claim", str(claim)])
+    result = invoke(
         [
             "simulate",
             "lease",
@@ -185,37 +192,37 @@ def test_simulate_through_answer_only_needs_the_respondent(env, case_bundle, tmp
 
 
 def test_simulate_refuses_fake_output_without_dry_run(env):
-    result = runner.invoke(app, ["simulate", "lease", "-m", "fake:demo", "--yes"])
+    result = invoke(["simulate", "lease", "-m", "fake:demo", "--yes"])
     assert result.exit_code == 1 and "fake model" in result.output
 
 
 def test_submit_needs_a_production_key(env, monkeypatch):
-    runner.invoke(app, ["simulate", "lease", "-m", "fake:demo", "--depth", "quick", "--dry-run"])
+    invoke(["simulate", "lease", "-m", "fake:demo", "--depth", "quick", "--dry-run"])
     monkeypatch.setenv("DECISIONLAYER_API_KEY", "dvarb_test_abc")
-    result = runner.invoke(app, ["submit", "latest", "--yes"])
+    result = invoke(["submit", "latest", "--yes"])
     assert result.exit_code == 1 and ("test key" in result.output or "fake model" in result.output)
 
 
 def test_next_on_a_blank_case_needs_a_terminal(env):
-    created = runner.invoke(app, ["case", "init", str(env / "my dispute")])
+    created = invoke(["case", "init", str(env / "my dispute")])
     assert created.exit_code == 0 and (env / "my dispute" / "case.json").exists()
-    result = runner.invoke(app, ["next", str(env / "my dispute"), "-m", "fake:demo"])
+    result = invoke(["next", str(env / "my dispute"), "-m", "fake:demo"])
     assert result.exit_code == 1 and "missing claimant name" in result.output
 
 
 def test_reset_clears_the_thread(env, case_bundle, tmp_path):
     claim = tmp_path / "claim.txt"
     claim.write_text(HUMAN_TEXT[Stage.CLAIM])
-    runner.invoke(app, ["case", "add-filing", "lease", "claim", str(claim)])
-    result = runner.invoke(app, ["case", "reset", "lease", "--yes"])
+    invoke(["case", "add-filing", "lease", "claim", str(claim)])
+    result = invoke(["case", "reset", "lease", "--yes"])
     assert result.exit_code == 0, result.output
     assert ThreadStore(case_bundle.root).entries() == []
 
 
 def test_case_list_and_missing_case(env):
-    listed = runner.invoke(app, ["case", "list"])
+    listed = invoke(["case", "list"])
     assert listed.exit_code == 0 and "Lease Commencement" in listed.output
-    missing = runner.invoke(app, ["case", "show", "nope"])
+    missing = invoke(["case", "show", "nope"])
     assert missing.exit_code == 1 and "No case named" in missing.output
 
 
@@ -224,7 +231,7 @@ def test_next_on_a_blank_case_asks_for_the_essentials(env, monkeypatch):
     import caseagent.cli as cli
 
     monkeypatch.setattr(cli, "interactive", lambda: True)
-    runner.invoke(app, ["case", "init", str(env / "deposit"), "--title", "Deposit dispute"])
+    invoke(["case", "init", str(env / "deposit"), "--title", "Deposit dispute"])
     answers = "\n".join(
         [
             "Avery Quinn",  # claimant
@@ -236,8 +243,7 @@ def test_next_on_a_blank_case_asks_for_the_essentials(env, monkeypatch):
             "",  # documents to attach
         ]
     )
-    result = runner.invoke(
-        app,
+    result = invoke(
         ["next", str(env / "deposit"), "-m", "fake:demo", "--depth", "quick"],
         input=answers + "\n",
     )
