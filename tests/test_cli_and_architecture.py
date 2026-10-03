@@ -255,3 +255,69 @@ def test_next_on_a_blank_case_asks_for_the_essentials(env, monkeypatch):
     assert case["financial_demand_usd"] == "3500.00"
     assert case["governing_contract"].startswith("The deposit is refundable")
     assert [e.stage for e in ThreadStore(env / "deposit").entries()] == [Stage.CLAIM]
+
+
+# ---------------------------------------------------------------------------- tour
+
+
+def test_tour_prints_every_step_without_running_anything(env):
+    """Outside a terminal the tour is a printed walkthrough; --print forces that."""
+    for args in (["tour"], ["tour", "--print"]):
+        result = invoke(args)
+        assert result.exit_code == 0, result.output
+        assert "Printing the walkthrough only" in result.output
+        for number in range(1, 9):
+            assert f"Step {number} of 8" in result.output
+        assert "$ caseagent doctor" in result.output
+        assert (
+            "$ caseagent simulate saas-outage -m fake:demo --depth quick --dry-run" in result.output
+        )
+        assert "$ caseagent submit latest" in result.output
+        assert "Run it?" not in result.output
+        assert "Tour complete" in result.output
+
+
+def test_tour_runs_the_real_commands_and_can_stop_and_resume(env, monkeypatch):
+    import caseagent.cli as cli
+
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    # Step 3: run the fake simulation, run `show latest`, then quit at the pause.
+    result = invoke(["tour", "--case", "lease", "--from", "3"], input="y\ny\nq\n")
+    assert result.exit_code == 0, result.output
+    assert "Step 3 of 8" in result.output
+    assert "Simulation plan: Lease Commencement" in result.output  # simulate ran
+    assert "Not simulated yet." in result.output  # show latest ran
+    assert "Stopped at step 3" in result.output
+    assert "caseagent tour --from 3" in result.output
+    runs = list((env / "runs").iterdir())
+    assert len(runs) == 1 and (runs[0] / "transcript.md").is_file()
+
+
+def test_tour_skips_commands_that_need_a_missing_key(env, monkeypatch):
+    import caseagent.cli as cli
+
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    # Step 4: next and reply are skipped for lack of a key; decline the other two; quit.
+    result = invoke(["tour", "--case", "lease", "--from", "4"], input="n\nn\nq\n")
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Skipped: OPENROUTER_API_KEY is not set") == 2
+    assert "writing the Claim" not in result.output
+    assert ThreadStore(env / "cases" / "lease").entries() == []
+    assert "Stopped at step 4" in result.output
+
+
+def test_tour_reports_a_failed_command_and_offers_to_carry_on(env, monkeypatch):
+    import caseagent.cli as cli
+
+    monkeypatch.setattr(cli, "interactive", lambda: True)
+    result = invoke(["tour", "--case", "nope", "--from", "3"], input="y\nn\n")
+    assert result.exit_code == 0, result.output
+    assert "No case named" in result.output
+    assert "did not succeed (exit 1)" in result.output
+    assert "Stopped at step 3" in result.output
+
+
+def test_tour_from_out_of_range(env):
+    result = invoke(["tour", "--from", "9"])
+    assert result.exit_code == 1 and "--from must be between 1 and 8" in result.output

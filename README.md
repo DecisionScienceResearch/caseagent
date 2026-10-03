@@ -49,6 +49,9 @@ Each simulation counts against the monthly allowance, so nothing is submitted wi
 
 ## Getting started
 
+`uv run caseagent tour` walks through the steps below in the terminal, explaining each
+command and running it only when you say so. The same steps, by hand:
+
 Cheapest first: the first real model call writes one filing, not a whole simulation.
 
 **1. Keys and a health check.** Put `OPENROUTER_API_KEY` in `.env` (and a production
@@ -167,6 +170,7 @@ under `work/`. Notes are never filed.
 | `sim list` / `sim status ID` / `sim result ID [--run RUN]` | Simulator API helpers (resume a run that timed out) |
 | `live status CASE_ID` / `live respond CASE_ID --materials CASE [--submit]` | Draft (and, after you affirm, file) the next round on a real or test-key case |
 | `models [WORDS...]` / `doctor` | Browse the model catalog; check configuration |
+| `tour [--from N] [--case KEY] [--print]` | Guided first run: the Getting started steps, one at a time |
 
 Composition options on `next` and `simulate`: `--depth quick|standard|thorough`,
 `--counterclaims auto|never`, `--evidence-demands`, `--max-words N`, `--effort low..max`,

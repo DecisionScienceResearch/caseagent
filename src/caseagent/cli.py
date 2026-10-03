@@ -13,6 +13,7 @@ import typer
 from rich.table import Table
 
 from . import __version__
+from . import tour as tour_steps
 from .core.agent import CaseAgent
 from .core.casefile import (
     CaseBundle,
@@ -92,6 +93,7 @@ app = typer.Typer(
         "Compose arbitration filings with an LLM, one turn at a time, and test them on the "
         "DecisionLayer simulator."
     ),
+    epilog="New here? [bold]caseagent tour[/bold] walks you through it, one step at a time.",
     no_args_is_help=True,
     add_completion=False,
     rich_markup_mode="rich",
@@ -1363,6 +1365,40 @@ def live_respond(
 
 
 # ------------------------------------------------------------------------- doctor
+
+
+@app.command("tour")
+@handle_errors
+def tour(
+    case: Annotated[
+        str, typer.Option("--case", help="Sample case the examples use.")
+    ] = tour_steps.DEFAULT_CASE,
+    start: Annotated[int, typer.Option("--from", "-f", help="Start at this step.")] = 1,
+    print_only: Annotated[
+        bool, typer.Option("--print", help="Print the walkthrough without running anything.")
+    ] = False,
+) -> None:
+    """A guided first run: the README's Getting Started, one step at a time.
+
+    Each step explains what is about to happen, shows the exact command, and runs it only
+    on a yes. Steps needing a key you have not set are skipped with a note.
+    """
+
+    def run(args: list[str]) -> int:
+        command = typer.main.get_command(app)
+        try:
+            code = command.main(args=args, prog_name="caseagent", standalone_mode=False)
+        except typer.Abort:
+            return 1
+        except typer.exceptions.TyperException as exc:
+            message = getattr(exc, "format_message", None)
+            console.print(f"[red]Error:[/red] {message() if message else exc}")
+            return 2
+        return int(code) if isinstance(code, int) else 0
+
+    tour_steps.run_tour(
+        tour_steps.build_steps(case), run, start=start, print_only=print_only or not interactive()
+    )
 
 
 @app.command("doctor")
