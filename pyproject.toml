@@ -1,0 +1,44 @@
+[project]
+name = "caseagent"
+version = "0.1.0"
+description = "An agent that composes arbitration filings (claim, answer, reply, response) and tests them against the DecisionLayer simulator."
+authors = [
+    { name = "Bill Ferrell", email = "wferrell@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "openai>=3.24.0",
+    "pydantic>=2.13.5",
+    "pypdf>=6.19.0",
+    "python-docx>=1.2.0",
+    "python-dotenv>=1.2.4",
+    "rich>=15.0.0",
+    "striprtf>=0.0.33",
+    "typer>=0.27.2",
+]
+
+[project.scripts]
+caseagent = "caseagent.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

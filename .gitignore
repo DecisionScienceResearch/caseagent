@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# python / uv
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+
+# agent output (prompts, drafts, awards). Case folders under cases/ are kept.
+runs/
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/

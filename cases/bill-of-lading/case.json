@@ -1,0 +1,27 @@
+{
+  "key": "bill-of-lading",
+  "title": "Bill Of Lading Dispute",
+  "claimant": {
+    "name": "Logistics Inc."
+  },
+  "respondent": {
+    "name": "ShipCorp"
+  },
+  "question_for_arbitration": "Whether Shipcorp owes $75,000 for damaged inventory to Logistics Inc.",
+  "financial_demand_usd": "75000.00",
+  "arbitration_clause": "This arbitration shall be administered by DecisionLayer.AI under its Foundational + Strict Contractual Ruleset, subject to the law of New York and the Federal Arbitration Act. The arbitration will be held online through DecisionLayer.ai. Both parties agree to resolve any claims relating to or arising out of these Terms or the Services through final and binding individual arbitration by a single arbitrator. Class arbitrations, class actions, private attorney general actions, and consolidation with other arbitrations are not allowed. The arbitrator may award relief only individually and only to the extent necessary to redress individual claims. The DecisionLayer rules will govern payment of all arbitration fees. Dropbox will not seek its attorneys' fees and costs in arbitration unless the arbitrator determines that the claim is frivolous or brought for an improper purpose.",
+  "governing_contract": "There is no governing contract, except that the parties have consented to resolve this dispute pursuant to the Federal Maritime Law of the united states and have consented to arbitration through DecisionLayer, with AI-enhanced arbitration.",
+  "evidence": {
+    "claim": [],
+    "answer": [],
+    "reply": [],
+    "response": []
+  },
+  "statements": {},
+  "source": {
+    "kind": "decisionlayer-sample",
+    "key": "bill-of-lading",
+    "fetched_at": "2026-10-02T23:30:47+00:00",
+    "attachments": 0
+  }
+}

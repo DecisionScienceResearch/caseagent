@@ -1,0 +1,27 @@
+{
+  "key": "estoppel-reliance",
+  "title": "Commercial Estoppel And Reliance Claim",
+  "claimant": {
+    "name": "Vanguard Data Systems Inch"
+  },
+  "respondent": {
+    "name": "Hudson Valley Heritage Properties, LLC"
+  },
+  "question_for_arbitration": "Vanguard Data Systems (Claimant) brings this action against Hudson Valley Heritage Properties (Respondent) for Promissory Estoppel.\n\nClaimant seeks to recover out-of-pocket financial losses suffered because it reasonably relied on the Respondent’s explicit, written promises to upgrade a commercial property’s electrical capacity to 10-megawatts by April 1, 2026. Respondent failed to deliver this upgrade, rendering the property useless for Claimant’s data center operations and causing severe financial detriment.",
+  "financial_demand_usd": "410000.00",
+  "arbitration_clause": "This arbitration shall be administered by DecisionLayer.AI under its Foundational + Strict Contractual Ruleset, subject to the law of New York and the Federal Arbitration Act. The arbitration will be held online through DecisionLayer.ai. Both parties agree to resolve any claims relating to or arising out of these Terms or the Services through final and binding individual arbitration by a single arbitrator. Class arbitrations, class actions, private attorney general actions, and consolidation with other arbitrations are not allowed. The arbitrator may award relief only individually and only to the extent necessary to redress individual claims. The DecisionLayer rules will govern payment of all arbitration fees. Dropbox will not seek its attorneys' fees and costs in arbitration unless the arbitrator determines that the claim is frivolous or brought for an improper purpose.",
+  "governing_contract": "None, this is a dispute by consent. Both parties have consented to arbitration by DecisionLayer.",
+  "evidence": {
+    "claim": [],
+    "answer": [],
+    "reply": [],
+    "response": []
+  },
+  "statements": {},
+  "source": {
+    "kind": "decisionlayer-sample",
+    "key": "estoppel-reliance",
+    "fetched_at": "2026-10-02T23:30:52+00:00",
+    "attachments": 0
+  }
+}
