@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import httpx
 import typer
@@ -51,7 +53,9 @@ from .core.view import build_stage_view
 from .decisionlayer import live as live_api
 from .decisionlayer.client import (
     TEST_KEY_PREFIX,
+    ArbitrationCase,
     Attachment,
+    Decision,
     DecisionLayerClient,
     DecisionLayerError,
     Simulation,
@@ -766,6 +770,17 @@ _register_next("reply", "reply", True, "Write the reply due to what is already i
 
 # ----------------------------------------------------------------------- simulate
 
+# What DecisionLayer asks every client to say before a simulation is run.
+SIMULATION_NOTICE = (
+    "DecisionLayer publishes the award PDF at a public link for 30 days, so use made-up "
+    "names if the dispute is real. Each run counts against the account's monthly simulation "
+    "allowance (10 by default)."
+)
+
+
+def _print_simulation_notice() -> None:
+    console.print(f"[yellow]Before you submit:[/yellow] {SIMULATION_NOTICE}")
+
 
 def _simulator_client(settings: Settings) -> DecisionLayerClient:
     if not settings.decisionlayer_api_key:
@@ -880,9 +895,10 @@ def simulate(
         client = _simulator_client(settings)
         if not stages and not case_store.entries():
             raise ConfigError("There is nothing to simulate.")
+        _print_simulation_notice()
         if not confirm(
             "Write the remaining filings and submit the case to the DecisionLayer simulator? "
-            "(This uses one simulation.)",
+            "(This uses one simulation and publishes the award.)",
             yes,
         ):
             raise typer.Exit(code=1)
@@ -924,7 +940,7 @@ def simulate(
     if dry_run or client is None:
         console.print(f"[dim]Submit it with `caseagent submit {record.run_id}`.[/dim]")
         return
-    _submit_run(client, bundle, store.root, timeout, yes=True)
+    _submit_run(client, bundle, store.root, timeout, yes=True, notice=False)
 
 
 def _auto_label(models: dict[Role, str], through: Stage | None) -> str:
@@ -961,7 +977,12 @@ def submit(
 
 
 def _submit_run(
-    client: DecisionLayerClient, bundle: CaseBundle, run_dir: Path, timeout: float, yes: bool
+    client: DecisionLayerClient,
+    bundle: CaseBundle,
+    run_dir: Path,
+    timeout: float,
+    yes: bool,
+    notice: bool = True,
 ) -> None:
     existing = load_simulation(run_dir)
     if existing is not None and not existing.finished:
@@ -977,6 +998,8 @@ def _submit_run(
     for warning in request.warnings:
         console.print(f"[yellow]Warning:[/yellow] {warning}")
     _print_request_summary(request)
+    if notice:
+        _print_simulation_notice()
     if not confirm("Submit this simulation to DecisionLayer?", yes):
         raise typer.Exit(code=1)
     idempotency_key = str(uuid.uuid4())
@@ -1034,19 +1057,32 @@ def _print_request_summary(request: SimulationRequest) -> None:
 
 
 def _print_award(text: str, sim_record: SimulationRecord) -> None:
-    section = sim_record.award_section or extract_award_section(text)
+    _print_award_text(
+        text, sim_record.award_section, sim_record.pdf_url, sim_record.page_url, Path("award.txt")
+    )
+
+
+def _print_award_text(
+    text: str,
+    section: str | None,
+    pdf_url: str | None,
+    page_url: str | None,
+    saved_to: Path | None,
+) -> None:
+    section = section or extract_award_section(text)
     console.print()
     console.rule("Award")
     if section:
         console.print(section)
         console.print()
-        console.print("[dim]Full text in award.txt.[/dim]")
+        if saved_to is not None:
+            console.print(f"[dim]Full text in {saved_to}.[/dim]")
     else:
         console.print(text)
-    if sim_record.pdf_url:
-        console.print(f"PDF: {sim_record.pdf_url}")
-    if sim_record.page_url:
-        console.print(f"Page: {sim_record.page_url}")
+    if pdf_url:
+        console.print(f"PDF: {pdf_url}")
+    if page_url:
+        console.print(f"Page: {page_url}")
 
 
 @sim_app.command("list")
@@ -1199,6 +1235,139 @@ def _live_client(settings: Settings, key_env: str) -> DecisionLayerClient:
     return DecisionLayerClient(api_key, settings.decisionlayer_base_url)
 
 
+def _when(moment: datetime) -> str:
+    return f"{moment.astimezone(UTC):%Y-%m-%d %H:%M} UTC"
+
+
+@contextmanager
+def _explaining_access(case_id: str) -> Iterator[None]:
+    """Turn the API's 404 reasons for a case into the step that opens it."""
+    try:
+        yield
+    except DecisionLayerError as exc:
+        if exc.status != 404 or exc.reason not in ("not_claimed", "not_a_party"):
+            raise
+        if exc.reason == "not_claimed":
+            message = (
+                f"Case {case_id} has not been claimed by this account. Run `caseagent live claim "
+                f"{case_id} CODE` with the verification code from DecisionLayer's notice, then "
+                "try again. (Test cases need no claim.)"
+            )
+        else:
+            message = (
+                f"This API key's account is not a party to case {case_id}. Use the key of the "
+                "claimant or the respondent on the case."
+            )
+        raise ConfigError(message) from exc
+
+
+def _fetch_decision(client: DecisionLayerClient, case_id: str) -> Decision | None:
+    """The published award, or None when the API says there is none yet."""
+    try:
+        return client.get_decision(case_id)
+    except DecisionLayerError as exc:
+        if exc.status == 404 and exc.reason == "not_published":
+            return None
+        raise
+
+
+def _show_and_save_decision(decision: Decision, directory: Path, base_url: str) -> None:
+    record = live_api.save_decision(directory, decision, base_url)
+    saved_to = directory / live_api.AWARD_FILENAME
+    _print_award_text(decision.text, record.award_section, decision.pdf_url, None, saved_to)
+    console.print(f"Saved award → {saved_to}")
+
+
+def _materials_for_live_case(
+    bundle: CaseBundle, case: ArbitrationCase, client: DecisionLayerClient
+) -> tuple[CaseBundle, list[str]]:
+    """Merge the API's view of the case into the local materials folder.
+
+    The API is authoritative for the claim form and knows the respondent's name.
+    The folder supplies the contract, the exhibits and the claimant's name; the
+    API gives only the claimant's email, though a claimant's own key can read
+    its account. Gaps are reported, not fatal: the agent can still write.
+    """
+    local = bundle.case
+    notes: list[str] = []
+    updates: dict[str, Any] = {
+        "question_for_arbitration": case.question_for_arbitration or local.question_for_arbitration,
+        "financial_demand_usd": case.financial_demand_usd,
+        "other_relief": case.other_relief,
+    }
+    if not local.respondent.name.strip():
+        updates["respondent"] = {
+            **local.respondent.model_dump(),
+            "name": case.respondent_name or Role.RESPONDENT.title,
+        }
+        if not case.respondent_name:
+            notes.append(
+                "The materials folder has no respondent name and the API did not supply one."
+            )
+    if not local.claimant.name.strip():
+        name = ""
+        if case.role == Role.CLAIMANT.value:
+            me = client.me()
+            name = f"{me.first_name} {me.last_name}".strip()
+        if not name:
+            notes.append(
+                f"The materials folder has no claimant name; add it to {bundle.root / 'case.json'}."
+            )
+        updates["claimant"] = {**local.claimant.model_dump(), "name": name or Role.CLAIMANT.title}
+    merged = CaseBundle(
+        case=CaseFile.model_validate({**local.model_dump(), **updates}), root=bundle.root
+    )
+    if not merged.contract().text.strip():
+        notes.append(
+            f"{bundle.root} has no contract text or file, so the agent will argue without the "
+            "agreement. Put the text in case.json (governing_contract) or the file in the folder "
+            "(contract_file)."
+        )
+    return merged, notes
+
+
+def _hint_next_action(case: ArbitrationCase) -> None:
+    """Say what this party does next, without doing it."""
+    if case.next_action == live_api.NEXT_ACTION_SIGN:
+        console.print(
+            "Next: sign the arbitration terms. "
+            f"`caseagent live sign {case.id}` prints a signing link."
+        )
+    elif case.next_action == live_api.NEXT_ACTION_RESPOND:
+        console.print(
+            f"Next: round {case.next_round} is open for you. "
+            f"`caseagent live respond {case.id} --materials CASE` drafts it."
+        )
+    elif case.next_action:
+        where = f" at {case.action_url}" if case.action_url else ""
+        console.print(f"Next: {case.next_action}{where}.")
+    else:
+        console.print(
+            "Nothing is waiting on you right now; `caseagent live status "
+            f"{case.id}` shows the case."
+        )
+
+
+def _print_signing_link(client: DecisionLayerClient, case_id: str) -> None:
+    """Ask the API for a signing URL and show it; the signing itself happens on the web."""
+    session = client.sign_case(case_id)
+    console.print(f"Sign the arbitration terms here: {session.signing_url}")
+    expires = f"The link expires at {_when(session.expires_at)}; " if session.expires_at else ""
+    console.print(
+        f"[dim]Provider: {session.provider or 'unknown'}. {expires}"
+        f"run `caseagent live sign {case_id}` for a fresh one.[/dim]"
+    )
+
+
+def _offer_signing_link(client: DecisionLayerClient, case: ArbitrationCase) -> None:
+    try:
+        _print_signing_link(client, case.id)
+    except DecisionLayerError as exc:
+        console.print(f"Could not start a signing session: {exc.message}")
+        if case.action_url:
+            console.print(f"Sign on the web instead: {case.action_url}")
+
+
 @live_app.command("status")
 @handle_errors
 def live_status(
@@ -1207,10 +1376,12 @@ def live_status(
         str, typer.Option("--key-env", help="Environment variable holding this party's API key.")
     ] = "DECISIONLAYER_API_KEY",
 ) -> None:
-    """Show a case's status, whose turn it is, and the response thread."""
+    """Show a case's status, whose turn it is, the deadline, and the response thread."""
     settings = Settings.load()
     client = _live_client(settings, key_env)
-    case = client.get_case(case_id)
+    with _explaining_access(case_id):
+        case = client.get_case(case_id)
+    responses = client.list_responses(case_id)
     console.print(
         f"[bold]{case.id}[/bold] · status {case.status} · you are the {case.role}"
         + (" · [yellow]test case[/yellow]" if case.test else "")
@@ -1219,19 +1390,113 @@ def live_status(
         f"Turn: {case.current_turn or '-'} · next round: {case.next_round or '-'} · "
         f"action required: {case.action_required} ({case.next_action or 'none'})"
     )
+    due = live_api.response_due(responses)
+    if due is not None:
+        console.print(f"Response due: {_when(due)}")
     if case.action_url:
         console.print(f"Action URL: {case.action_url}")
+    if case.view_url:
+        console.print(f"Case page: {case.view_url}")
+    if case.next_action == live_api.NEXT_ACTION_SIGN:
+        console.print(
+            "[yellow]The arbitration terms must be signed before this party can file.[/yellow] "
+            f"`caseagent live sign {case.id}` prints a signing link."
+        )
     console.print(f"Accepted fields: {', '.join(case.accepted_fields) or '-'}")
-    console.print(f"Demand: ${case.financial_demand_usd}")
+    console.print(
+        f"Respondent: {case.respondent_name or '-'} · Demand: ${case.financial_demand_usd}"
+    )
     console.print()
     console.print("[bold]Claim form[/bold]")
     console.print(case.question_for_arbitration)
-    for stage, filing in live_api.thread_from_api(case, client.list_responses(case_id)).items():
+    for stage, filing in live_api.thread_from_api(case, responses).items():
         console.print()
         console.print(
             f"[bold]{stage.title}[/bold] ({stage.role.value}) · {filing.word_count} words"
         )
         console.print(filing.argument[:600] + ("…" if len(filing.argument) > 600 else ""))
+        if filing.documents:
+            console.print(
+                "Files: " + ", ".join(f"{doc.name} ({doc.kind.value})" for doc in filing.documents)
+            )
+    if case.status == "decided":
+        decision = _fetch_decision(client, case_id)
+        if decision is None:
+            console.print("\nThe case is decided but the award is not published yet.")
+        else:
+            _show_and_save_decision(
+                decision, settings.runs_dir / f"live-{case_id}", client.base_url
+            )
+
+
+@live_app.command("decision")
+@handle_errors
+def live_decision(
+    case_id: Annotated[str, typer.Argument(help="Case id (case_...).")],
+    key_env: Annotated[
+        str, typer.Option("--key-env", help="Environment variable holding this party's API key.")
+    ] = "DECISIONLAYER_API_KEY",
+    out: Annotated[
+        Path | None,
+        typer.Option(
+            "--out", help="Directory for award.txt and decision.json (default: runs/live-CASE_ID)."
+        ),
+    ] = None,
+) -> None:
+    """Fetch a decided case's award: print the AWARD paragraph and save the full text."""
+    settings = Settings.load()
+    client = _live_client(settings, key_env)
+    with _explaining_access(case_id):
+        decision = _fetch_decision(client, case_id)
+        if decision is None:
+            case = client.get_case(case_id)
+            turn = f"; it is the {case.current_turn}'s turn" if case.current_turn else ""
+            raise ConfigError(
+                f"No award has been published for case {case_id} yet (status: {case.status}"
+                f"{turn}). Case page: {case.view_url or '-'}"
+            )
+    _show_and_save_decision(decision, out or settings.runs_dir / f"live-{case_id}", client.base_url)
+
+
+@live_app.command("sign")
+@handle_errors
+def live_sign(
+    case_id: Annotated[str, typer.Argument(help="Case id (case_...).")],
+    key_env: Annotated[
+        str, typer.Option("--key-env", help="Environment variable holding this party's API key.")
+    ] = "DECISIONLAYER_API_KEY",
+) -> None:
+    """Get a link to sign the arbitration terms (when the case's next action is sign_terms)."""
+    settings = Settings.load()
+    client = _live_client(settings, key_env)
+    with _explaining_access(case_id):
+        _print_signing_link(client, case_id)
+
+
+@live_app.command("claim")
+@handle_errors
+def live_claim(
+    case_id: Annotated[str, typer.Argument(help="Case id (case_...) from the notice.")],
+    code: Annotated[str, typer.Argument(help="The verification code from the notice.")],
+    key_env: Annotated[
+        str, typer.Option("--key-env", help="Environment variable holding this party's API key.")
+    ] = "DECISIONLAYER_API_KEY",
+) -> None:
+    """Claim a case as its respondent with the verification code DecisionLayer sent you.
+
+    Needed once per production case before this key can read or answer it. Test cases
+    need no claim: the named respondent's test key opens them directly.
+    """
+    settings = Settings.load()
+    client = _live_client(settings, key_env)
+    with _explaining_access(case_id):
+        case = client.claim_case(case_id, code.strip())
+    console.print(
+        f"[green]✓[/green] Claimed case {case.id} as the {case.role} (status: {case.status})."
+    )
+    if case.view_url:
+        console.print(f"Case page: {case.view_url}")
+    _hint_next_action(case)
 
 
 @live_app.command("respond")
@@ -1279,24 +1544,28 @@ def live_respond(
     """
     settings = Settings.load()
     client = _live_client(settings, key_env)
-    case = client.get_case(case_id)
-    stage = live_api.stage_to_file(case)
-    thread = live_api.thread_from_api(case, client.list_responses(case_id))
+    with _explaining_access(case_id):
+        case = client.get_case(case_id)
+    try:
+        stage = live_api.stage_to_file(case)
+    except live_api.SignatureRequired as exc:
+        # Nothing is composed until the terms are signed; hand over the signing link instead.
+        console.print(f"[yellow]{exc}[/yellow]")
+        _offer_signing_link(client, case)
+        raise typer.Exit(code=1) from None
+    responses = client.list_responses(case_id)
+    thread = live_api.thread_from_api(case, responses)
+    due = live_api.response_due(responses)
 
-    bundle = resolve_case(materials, settings.cases_dir)
-    # The API is authoritative for the claim form; the folder supplies the rest.
-    case_file = CaseFile.model_validate(
-        {
-            **bundle.case.model_dump(),
-            "question_for_arbitration": case.question_for_arbitration
-            or bundle.case.question_for_arbitration,
-            "financial_demand_usd": case.financial_demand_usd,
-            "other_relief": case.other_relief,
-        }
+    bundle, notes = _materials_for_live_case(
+        resolve_case(materials, settings.cases_dir), case, client
     )
-    bundle = CaseBundle(case=case_file, root=bundle.root)
+    case_file = bundle.case
+    for note in notes:
+        console.print(f"[yellow]Warning:[/yellow] {note}")
     console.print(
         f"Case {case.id}: round {case.next_round} ({stage.title}) is open for the {case.role}"
+        + (f" · due {_when(due)}" if due is not None else "")
         + (" · [yellow]test case[/yellow]" if case.test else " · [red]live case[/red]")
     )
     if submit and not case.test and not allow_production:
@@ -1319,6 +1588,13 @@ def live_respond(
             raise ConfigError("--interview needs a terminal to ask questions in.")
         bundle = _interview(agent, bundle, stage, thread, rounds=2, max_questions=8)
     view = build_stage_view(bundle, stage, thread)
+    if missing := view.unavailable_documents:
+        console.print(
+            f"[yellow]Note:[/yellow] {len(missing)} file(s) on the record are not in "
+            f"{bundle.evidence_dir}, so the agent knows them by name only: {', '.join(missing)}. "
+            f"Download them from {case.view_url or 'the case page'} and add them with "
+            f"`caseagent case add-evidence {materials} <stage> FILES...` so it can read them."
+        )
     with progress:
         progress.on_stage(stage, "start")
         result = agent.compose(view)
@@ -1462,6 +1738,13 @@ def doctor() -> None:
                 f"{warn if client.is_test_key else ok} DecisionLayer key for {me.email} ({kind}) "
                 f"at {settings.decisionlayer_base_url}"
             )
+            if me.can_file_cases:
+                console.print(f"{ok} Case filing: approved for this account")
+            else:
+                console.print(
+                    f"{warn} Case filing: not approved for this account (simulations, claiming "
+                    "and responding still work; ask casemanager@decisionlayer.ai for filing access)"
+                )
         except DecisionLayerError as exc:
             console.print(f"{bad} DecisionLayer: {exc.message}")
     else:

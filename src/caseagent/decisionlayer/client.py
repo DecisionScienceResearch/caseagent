@@ -7,8 +7,13 @@ at ``/api/run-a-simulation`` and ``/api/create-a-case``:
 * form endpoints are multipart, with repeatable file fields;
 * a file of 8 MiB or more goes through ``POST /api/v1/uploads`` and is sent as
   a ticket in the field's ``*_ticket(s)`` sibling;
-* errors are ``{"error": {"status", "message", "details", "reason"}}``;
-* creates accept an ``Idempotency-Key`` so a retry cannot file twice.
+* errors are ``{"error": {"status", "message", "details", "reason"}}``; a 5xx
+  that carries that body came from the API itself and is replayed for the same
+  ``Idempotency-Key``, so only bodiless gateway failures are retried;
+* creates accept an ``Idempotency-Key`` so a retry cannot file twice; upload
+  tickets a failed create did not consume are cancelled;
+* ``POST /api/v1/cases/{id}/sign`` returns a signing URL for the arbitration
+  terms when the key owner's ``next_action`` is ``sign_terms``.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import mimetypes
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +51,7 @@ TICKET_FIELDS = {
     "counterclaim_files": "counterclaim_files_tickets",
 }
 
+# Gateway failures worth retrying; see ``_is_api_error`` for the exception.
 RETRY_STATUSES = {502, 503, 504}
 RETRY_DELAYS = (2.0, 5.0, 10.0)
 # A retried create returns 409 while the first attempt still holds the key's
@@ -149,6 +156,7 @@ class ArbitrationCase(_ApiModel):
     next_round: int | None = None
     accepted_fields: list[str] = Field(default_factory=list)
     action_required: bool = False
+    # complete_form | sign_terms | pay_filing_fee | verify_identity | respond
     next_action: str | None = None
     action_url: str | None = None
     view_url: str | None = None
@@ -156,7 +164,22 @@ class ArbitrationCase(_ApiModel):
     financial_demand_usd: str = "0.00"
     other_relief: str | None = None
     argument: str | None = None
+    claimant_email: str | None = None
+    respondent_type: str = "individual"
+    respondent_first_name: str = ""
+    respondent_last_name: str = ""
     test: bool = False
+
+    @property
+    def respondent_name(self) -> str:
+        return f"{self.respondent_first_name} {self.respondent_last_name}".strip()
+
+
+class EvidenceFile(_ApiModel):
+    """A file attached to a response round; the API serves its name, not the file."""
+
+    name: str
+    kind: str = "supporting"  # supporting | evidence_response | counterclaim
 
 
 class CaseResponse(_ApiModel):
@@ -170,7 +193,18 @@ class CaseResponse(_ApiModel):
     counterclaim_argument: str | None = None
     counterclaim_amount_usd: str | None = None
     counterclaim_other_relief: str | None = None
+    evidence_files: list[EvidenceFile] = Field(default_factory=list)
     submitted_at: datetime | None = None
+    # When the next round's response is due; null after the final round.
+    due_at: datetime | None = None
+
+
+class SigningSession(_ApiModel):
+    """A URL for signing the arbitration terms. Open it before it expires."""
+
+    signing_url: str
+    expires_at: datetime | None = None
+    provider: str | None = None  # signwell | hosted
 
 
 class ResponseCreated(_ApiModel):
@@ -202,6 +236,15 @@ class Attachment:
 
     field: str
     path: Path
+
+
+def _is_api_error(response: httpx.Response) -> bool:
+    """True when the body is the API's own error envelope, i.e. the API handled the request."""
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and isinstance(body.get("error"), dict)
 
 
 class DecisionLayerClient:
@@ -338,6 +381,29 @@ class DecisionLayerClient:
             self._request("GET", f"/api/v1/cases/{case_id}/decision").json()
         )
 
+    def sign_case(self, case_id: str) -> SigningSession:
+        """A signing URL for the party whose ``next_action`` is ``sign_terms``.
+
+        Call again for a fresh URL once it expires. 409 when this party is not
+        waiting on a signature (a test case never is).
+        """
+        response = self._request("POST", f"/api/v1/cases/{case_id}/sign")
+        return SigningSession.model_validate(response.json())
+
+    def claim_case(self, case_id: str, verification_code: str) -> ArbitrationCase:
+        """Become the respondent on a production case with the code from the notice.
+
+        Until then the case reads as 404 with reason ``not_claimed``. The code
+        is single-use, but the same account may send it again. 403 with reason
+        ``invalid_code`` when it is rejected; the claimant cannot claim.
+        """
+        response = self._request(
+            "POST",
+            f"/api/v1/cases/{case_id}/claim",
+            json={"verification_code": verification_code},
+        )
+        return ArbitrationCase.model_validate(response.json())
+
     # ------------------------------------------------------------------ uploads
 
     def upload_files(self, paths: Sequence[Path]) -> list[str]:
@@ -369,6 +435,15 @@ class DecisionLayerClient:
                 tickets.append(session["ticket"])
         return tickets
 
+    def cancel_uploads(self, tickets: Sequence[str]) -> int:
+        """Discard step-one uploads the API has not consumed; returns how many were removed."""
+        deleted = 0
+        for start in range(0, len(tickets), UPLOAD_BATCH_SIZE):
+            batch = list(tickets[start : start + UPLOAD_BATCH_SIZE])
+            response = self._request("POST", "/api/v1/uploads/cancel", json={"tickets": batch})
+            deleted += int(response.json().get("deleted") or 0)
+        return deleted
+
     # ---------------------------------------------------------------- internals
 
     def _post_form(
@@ -378,14 +453,22 @@ class DecisionLayerClient:
         attachments: Sequence[Attachment],
         idempotency_key: str | None,
     ) -> httpx.Response:
-        parts = self._form_parts(fields, attachments)
+        parts, tickets = self._form_parts(fields, attachments)
         headers = {"Idempotency-Key": idempotency_key or str(uuid.uuid4())}
-        return self._request("POST", path, files=parts, headers=headers)
+        try:
+            return self._request("POST", path, files=parts, headers=headers)
+        except DecisionLayerError as exc:
+            # Tickets the API did not consume would otherwise linger until they expire.
+            # A 409 may mean a first attempt is still being processed, so leave those alone.
+            if tickets and exc.status != 409:
+                with suppress(DecisionLayerError):
+                    self.cancel_uploads(tickets)
+            raise
 
     def _form_parts(
         self, fields: Mapping[str, str], attachments: Sequence[Attachment]
-    ) -> list[tuple[str, tuple[Any, ...]]]:
-        """Build multipart parts.
+    ) -> tuple[list[tuple[str, tuple[Any, ...]]], list[str]]:
+        """Build multipart parts; also return the upload tickets they carry, if any.
 
         Text fields are sent as parts without a filename, which keeps the body
         multipart even when no file is attached (these endpoints do not accept
@@ -410,6 +493,7 @@ class DecisionLayerClient:
                 raise DecisionLayerError(0, f"{attachment.path.name} is empty.")
             sizes.append(size)
 
+        tickets: list[str] = []
         if any(size >= LARGE_FILE_BYTES for size in sizes):
             tickets = self.upload_files([attachment.path for attachment in attachments])
             for attachment, ticket in zip(attachments, tickets, strict=True):
@@ -420,7 +504,7 @@ class DecisionLayerClient:
                 parts.append(
                     (attachment.field, (attachment.path.name, attachment.path.read_bytes(), mime))
                 )
-        return parts
+        return parts, tickets
 
     def _request(
         self,
@@ -448,7 +532,7 @@ class DecisionLayerClient:
                 self._sleep(delays.pop(0))
                 retried = True
                 continue
-            if response.status_code in RETRY_STATUSES and delays:
+            if response.status_code in RETRY_STATUSES and delays and not _is_api_error(response):
                 self._sleep(delays.pop(0))
                 retried = True
                 continue

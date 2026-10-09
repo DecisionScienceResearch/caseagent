@@ -8,20 +8,25 @@ import httpx
 import pytest
 from conftest import SAMPLE_FILES, SAMPLE_RAW, human_filing
 
-from caseagent.core.models import Counterclaim, Filing, Stage
+from caseagent.core.models import Counterclaim, DocumentKind, Filing, Stage
 from caseagent.decisionlayer import client as client_module
 from caseagent.decisionlayer.client import (
     ArbitrationCase,
     Attachment,
     CaseResponse,
+    Decision,
     DecisionLayerClient,
     DecisionLayerError,
     SimulationFailed,
     SimulationTimeout,
 )
 from caseagent.decisionlayer.live import (
+    ActionRequired,
     LiveCaseError,
+    SignatureRequired,
+    response_due,
     response_form,
+    save_decision,
     stage_to_file,
     thread_from_api,
 )
@@ -254,7 +259,7 @@ def test_retries_transient_failures_with_same_idempotency_key():
         if len(attempts) == 1:
             raise httpx.ConnectError("boom")
         if len(attempts) == 2:
-            return api_error(503, "busy")
+            return httpx.Response(503, text="<html>Service Unavailable</html>")  # a gateway
         return httpx.Response(201, json=simulation_json())
 
     sleeps = []
@@ -492,22 +497,39 @@ def live_case(**overrides) -> ArbitrationCase:
 def test_thread_from_api_and_stage_to_file():
     case = live_case()
     assert stage_to_file(case) is Stage.ANSWER
+    assert stage_to_file(live_case(next_action=None)) is Stage.ANSWER
     responses = [
-        CaseResponse(
-            id="case_1:r1",
-            case_id="case_1",
-            round=1,
-            submitted_by="respondent",
-            argument="Forfeited under 4.2.",
-            counterclaim_argument="Cleaning costs.",
-            counterclaim_amount_usd="1200.00",
-            evidence_demands="March statement.",
+        CaseResponse.model_validate(
+            {
+                "id": "case_1:r1",
+                "case_id": "case_1",
+                "round": 1,
+                "submitted_by": "respondent",
+                "argument": "Forfeited under 4.2.",
+                "counterclaim_argument": "Cleaning costs.",
+                "counterclaim_amount_usd": "1200.00",
+                "evidence_demands": "March statement.",
+                "evidence_files": [
+                    {"name": "Exhibit R-1 - Lease.pdf", "kind": "supporting"},
+                    {"name": "Exhibit R-2 - Invoice.pdf", "kind": "counterclaim"},
+                    {"name": "Exhibit R-3 - Odd.pdf", "kind": "something_new"},
+                ],
+                "submitted_at": "2026-10-02T00:00:00Z",
+                "due_at": "2026-10-16T00:00:00Z",
+            }
         ),
     ]
     thread = thread_from_api(case, responses)
     assert thread[Stage.CLAIM].argument == "The deposit was due back."
     assert thread[Stage.ANSWER].counterclaim.amount_usd == 1200
     assert thread[Stage.ANSWER].evidence_demands == "March statement."
+    assert [(doc.name, doc.kind) for doc in thread[Stage.ANSWER].documents] == [
+        ("Exhibit R-1 - Lease.pdf", DocumentKind.SUPPORTING),
+        ("Exhibit R-2 - Invoice.pdf", DocumentKind.COUNTERCLAIM),
+        ("Exhibit R-3 - Odd.pdf", DocumentKind.SUPPORTING),  # an unknown kind degrades safely
+    ]
+    assert response_due(responses) == datetime(2026, 10, 16, tzinfo=UTC)
+    assert response_due([]) is None
 
     with pytest.raises(LiveCaseError, match="claimant's turn"):
         stage_to_file(live_case(current_turn="claimant"))
@@ -520,6 +542,12 @@ def test_thread_from_api_and_stage_to_file():
                 action_url="https://x/terms",
             )
         )
+    # This party's turn, but the API says its terms are unsigned: stop before composing.
+    with pytest.raises(SignatureRequired, match="must sign the arbitration terms") as excinfo:
+        stage_to_file(live_case(next_action="sign_terms", action_url="https://x/terms"))
+    assert excinfo.value.case.action_url == "https://x/terms"
+    with pytest.raises(ActionRequired, match="verify_identity"):
+        stage_to_file(live_case(next_action="verify_identity"))
 
 
 def test_response_form_requires_affirmation_and_accepted_fields():
@@ -539,3 +567,126 @@ def test_response_form_requires_affirmation_and_accepted_fields():
     }
     with pytest.raises(LiveCaseError, match="does not accept 'counterclaim_argument'"):
         response_form(filing, ["argument", "affirmation", "evidence"], affirmed=True)
+
+
+def test_sign_case_returns_a_signing_session():
+    def handler(request):
+        assert request.method == "POST" and request.url.path == "/api/v1/cases/case_1/sign"
+        return httpx.Response(
+            200,
+            json={
+                "signing_url": "https://x/sign/abc",
+                "expires_at": "2026-10-02T01:00:00Z",
+                "provider": "signwell",
+            },
+        )
+
+    session = make_client(handler).sign_case("case_1")
+    assert session.signing_url == "https://x/sign/abc" and session.provider == "signwell"
+    assert session.expires_at == datetime(2026, 10, 2, 1, tzinfo=UTC)
+
+    def not_waiting(request):
+        return api_error(409, "This party is not waiting on a signature")
+
+    with pytest.raises(DecisionLayerError, match="not waiting on a signature"):
+        make_client(not_waiting).sign_case("case_1")
+
+
+def test_claim_case_posts_the_verification_code():
+    def handler(request):
+        assert request.method == "POST" and request.url.path == "/api/v1/cases/case_1/claim"
+        assert json.loads(request.content) == {"verification_code": "ABC-123"}
+        claimed = live_case(next_action="sign_terms", test=False).model_dump(mode="json")
+        return httpx.Response(200, json=claimed)
+
+    case = make_client(handler).claim_case("case_1", "ABC-123")
+    assert case.role == "respondent" and case.next_action == "sign_terms"
+
+    def rejected(request):
+        return api_error(403, "The verification code was rejected", reason="invalid_code")
+
+    with pytest.raises(DecisionLayerError) as excinfo:
+        make_client(rejected).claim_case("case_1", "nope")
+    assert excinfo.value.status == 403 and excinfo.value.reason == "invalid_code"
+
+
+def test_api_errors_are_not_retried_but_gateway_errors_are():
+    attempts = []
+
+    def api_502(request):
+        attempts.append(1)
+        return api_error(502, "The simulation could not be queued for a decision")
+
+    with pytest.raises(DecisionLayerError, match="could not be queued"):
+        make_client(api_502).create_simulation({"a": "b"}, idempotency_key="k")
+    assert len(attempts) == 1  # the API answered; the same key would only replay it
+
+    gateway = []
+
+    def gateway_502(request):
+        gateway.append(1)
+        if len(gateway) < 3:
+            return httpx.Response(502, text="<html>Bad Gateway</html>")
+        return httpx.Response(200, json=simulation_json("ready"))
+
+    sleeps = []
+    assert make_client(gateway_502, sleeps=sleeps).get_simulation("case_sim1").status == "ready"
+    assert len(gateway) == 3 and sleeps == [2.0, 5.0]
+
+
+def test_failed_submit_cancels_its_upload_tickets(tmp_path, monkeypatch):
+    monkeypatch.setattr(client_module, "LARGE_FILE_BYTES", 10)
+    big = tmp_path / "big.pdf"
+    big.write_bytes(b"%PDF" + b"x" * 50)
+    cancelled = []
+
+    def make_handler(final_status):
+        def handler(request):
+            if request.url.path == "/api/v1/uploads":
+                session = {
+                    "upload_id": "u0",
+                    "filename": "big.pdf",
+                    "content_type": "application/pdf",
+                    "size": 54,
+                    "upload_url": "https://storage.example/big.pdf",
+                    "ticket": "ticket-0",
+                    "expires_at": "2026-10-02T00:00:00Z",
+                }
+                return httpx.Response(200, json={"batch_id": "b1", "uploads": [session]})
+            if request.url.host == "storage.example":
+                return httpx.Response(200)
+            if request.url.path == "/api/v1/uploads/cancel":
+                cancelled.append(json.loads(request.content)["tickets"])
+                return httpx.Response(200, json={"deleted": 1})
+            return api_error(final_status, "rejected")
+
+        return handler
+
+    with pytest.raises(DecisionLayerError, match="rejected"):
+        make_client(make_handler(422)).create_simulation(
+            {"q": "x"}, [Attachment("contract_file", big)]
+        )
+    assert cancelled == [["ticket-0"]]
+
+    # A 409 may mean a first attempt is still being processed: its tickets are left alone.
+    cancelled.clear()
+    with pytest.raises(DecisionLayerError):
+        make_client(make_handler(409)).create_simulation(
+            {"q": "x"}, [Attachment("contract_file", big)]
+        )
+    assert cancelled == []
+
+
+def test_save_decision_writes_award_and_record(tmp_path):
+    decision = Decision(
+        id="dec_1",
+        case_id="case_1",
+        text=SAMPLE_AWARD,
+        published_at=datetime(2026, 10, 2, tzinfo=UTC),
+        pdf_url="https://x/a.pdf",
+    )
+    record = save_decision(tmp_path / "live-case_1", decision, "https://staging.example")
+    assert record.award_section.startswith("Respondent, SolidEdge")
+    assert (tmp_path / "live-case_1" / "award.txt").read_text().startswith("ARBITRATION DECISION")
+    saved = json.loads((tmp_path / "live-case_1" / "decision.json").read_text())
+    assert saved["decision_id"] == "dec_1" and saved["pdf_url"] == "https://x/a.pdf"

@@ -13,6 +13,7 @@ from caseagent.core.casefile import (
 from caseagent.core.models import (
     CaseFile,
     Counterclaim,
+    DocumentKind,
     Filing,
     Role,
     Stage,
@@ -159,3 +160,15 @@ def test_save_case_strips_none(tmp_path):
     )
     save_case(case, tmp_path / "k")
     assert '"other_relief"' not in (tmp_path / "k" / "case.json").read_text()
+
+
+def test_filing_documents_roundtrip():
+    filing = Filing(
+        stage=Stage.ANSWER,
+        argument="a",
+        documents=[{"name": "Exhibit R-1.pdf", "kind": "counterclaim"}],
+    )
+    assert filing.documents[0].kind is DocumentKind.COUNTERCLAIM
+    assert Filing.model_validate_json(filing.model_dump_json()) == filing
+    assert Filing(stage=Stage.CLAIM, argument="c").documents == []
+    assert DocumentKind.EVIDENCE_RESPONSE.describe.startswith("produced in response")

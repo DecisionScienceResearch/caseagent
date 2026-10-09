@@ -5,6 +5,10 @@ the claim form, the contract, every earlier filing, the exhibits filed with
 those earlier filings, its own exhibits for the filing it is writing, and its
 own principal's statements. It does not see later filings, the other side's
 unfiled exhibits, or the other side's statements.
+
+A filing read from a live case names the files filed with it. One that is not
+in the case folder is known by name only; ``StageView.unavailable_documents``
+lists those so the caller can say so.
 """
 
 from __future__ import annotations
@@ -86,6 +90,17 @@ class StageView:
     @property
     def new_exhibits(self) -> tuple[ExhibitView, ...]:
         return tuple(exhibit for exhibit in self.exhibits if exhibit.is_new)
+
+    @property
+    def unavailable_documents(self) -> tuple[str, ...]:
+        """Files the record says were filed whose text is not among the exhibits."""
+        on_hand = {exhibit.name for exhibit in self.exhibits}
+        missing: dict[str, None] = {}
+        for filing in self.record:
+            for document in filing.documents:
+                if document.name not in on_hand:
+                    missing.setdefault(document.name, None)
+        return tuple(missing)
 
 
 def build_stage_view(bundle: CaseBundle, stage: Stage, thread: dict[Stage, Filing]) -> StageView:

@@ -46,8 +46,10 @@ Anthropic, OpenAI, Google, xAI, DeepSeek, Meta, Mistral and others; the default 
 Ollama).
 
 The simulator needs a **production** DecisionLayer key (`dvarb_...`); test keys get 403.
-Each simulation counts against the monthly allowance, so nothing is submitted without
-`simulate` (which confirms first) or `submit`.
+DecisionLayer publishes every simulated award at a **public link for 30 days**, so use
+made-up party names if the dispute is real, and each simulation counts against the monthly
+allowance (10 by default). Nothing is submitted without `simulate` (which says so and
+confirms first) or `submit`.
 
 ## Getting started
 
@@ -152,6 +154,7 @@ uv run caseagent next cases/their-claim --interview
 from either side: write your Claim, paste in their Answer with `add-filing`, write your
 Reply. Or have the agent draft the other side's filing too, to see what you are up
 against, and `caseagent simulate cases/my-dispute` to finish both sides and get an award.
+The award is published at a public link for 30 days, so give the parties made-up names.
 `case show CASE --full` prints the thread; `case reset CASE [--last]` rewinds it.
 
 Each filing is saved in the case folder under `filings/`, with the agent's prompts,
@@ -170,7 +173,7 @@ under `work/`. Notes are never filed.
 | `submit RUN \| latest` | Submit a dry run (or resubmit) and save the award |
 | `runs` / `show RUN [--award]` | Compare runs; print a transcript and award |
 | `sim list` / `sim status ID` / `sim result ID [--run RUN]` | Simulator API helpers (resume a run that timed out) |
-| `live status CASE_ID` / `live respond CASE_ID --materials CASE [--submit]` | Draft (and, after you affirm, file) the next round on a real or test-key case |
+| `live claim CASE_ID CODE` / `live status CASE_ID` / `live sign CASE_ID` / `live respond CASE_ID --materials CASE [--submit]` / `live decision CASE_ID` | Claim a case you were named on; check it; get a signing link; draft (and, after you affirm, file) the next round; save the award |
 | `models [WORDS...]` / `doctor` | Browse the model catalog; check configuration |
 | `tour [--from N] [--case KEY] [--print]` | Guided first run: the Getting started steps, one at a time |
 
@@ -243,5 +246,24 @@ affirm the filing (the affirmation is the party's, not the agent's) and posts it
 (non-test) cases additionally require `--allow-production`. A `dvarb_test_` key per party
 lets you exercise all three rounds without signing, payment or email; see "Test the full
 response flow" in the API guide.
+
+A respondent on a production case first claims it: `caseagent live claim CASE_ID CODE`
+with the verification code from DecisionLayer's notice binds the case to your account.
+Until then the API answers 404 (`not_claimed`), and `live status` and `live respond` say
+so. Test cases need no claim.
+
+`live status` shows the deadline for the open round and the files filed with each round.
+If the API says this party must sign the arbitration terms first, `live respond` stops
+before composing and prints a signing link (`live sign CASE_ID` does the same). The API
+does not serve the other side's exhibits, so the agent knows them by name only; download
+them from the case page and add them to the materials folder with `case add-evidence` to
+let it read them. If the folder has no respondent name, the API's is used; a folder with
+no contract is warned about, since the agent then argues without the agreement.
+
+Once the case is `decided`, `live status` fetches the award, and `live decision CASE_ID`
+does so on its own. Both print the AWARD paragraph and save the full text to
+`runs/live-CASE_ID/award.txt` with a `decision.json` beside it, as a simulation run does.
+The PDF link works for 30 days; the text stays. `caseagent doctor` says whether the
+account is approved to file cases (simulations, claiming and responding need no approval).
 
 Awards are AI-generated simulations and not legal advice; see DecisionLayer's terms.

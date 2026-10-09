@@ -33,6 +33,7 @@ _STRUCTURAL_TAGS = (
     "counterclaim",
     "documentation_demands",
     "response_to_documentation_demands",
+    "documents_filed",
     "exhibits",
     "exhibit",
     "principal_statement",
@@ -201,6 +202,17 @@ def _filing_block(view: StageView, filing: Filing) -> str:
         parts.append(
             f"<documentation_demands>\n{_defang(filing.evidence_demands)}\n</documentation_demands>"
         )
+    if filing.documents:
+        on_hand = {exhibit.name for exhibit in view.exhibits}
+        lines = []
+        for document in filing.documents:
+            status = (
+                "its text is in the exhibits"
+                if document.name in on_hand
+                else "you do not have this file, so do not describe or rely on its contents"
+            )
+            lines.append(f"- {_defang(document.name)}: {document.kind.describe}; {status}.")
+        parts.append("<documents_filed>\n" + "\n".join(lines) + "\n</documents_filed>")
     return header + "\n" + "\n".join(parts) + "\n</filing>"
 
 

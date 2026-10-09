@@ -199,14 +199,50 @@ class Counterclaim(BaseModel):
         return None if value is None else format_usd(value)
 
 
+class DocumentKind(StrEnum):
+    """Which part of a filing a submitted file supports."""
+
+    SUPPORTING = "supporting"
+    EVIDENCE_RESPONSE = "evidence_response"
+    COUNTERCLAIM = "counterclaim"
+
+    @property
+    def describe(self) -> str:
+        return _KIND_DESCRIPTIONS[self]
+
+
+_KIND_DESCRIPTIONS: dict[DocumentKind, str] = {
+    DocumentKind.SUPPORTING: "filed in support of the argument",
+    DocumentKind.EVIDENCE_RESPONSE: "produced in response to documentation demands",
+    DocumentKind.COUNTERCLAIM: "filed in support of the counterclaim",
+}
+
+
+class FiledDocument(BaseModel):
+    """A file submitted with a filing, known by name.
+
+    Its text is on hand only when a file of that name is also in the case
+    folder; on a live case the other side's exhibits are known by name alone.
+    """
+
+    name: str
+    kind: DocumentKind = DocumentKind.SUPPORTING
+
+
 class Filing(BaseModel):
-    """One party's submission for one phase."""
+    """One party's submission for one phase.
+
+    ``documents`` names the files submitted with it. A thread kept locally
+    leaves it empty, since ``CaseFile.evidence`` already lists the exhibits per
+    phase; a thread read from the API fills it from each round's file list.
+    """
 
     stage: Stage
     argument: str
     counterclaim: Counterclaim | None = None
     evidence_demands: str | None = None
     evidence_response: str | None = None
+    documents: list[FiledDocument] = Field(default_factory=list)
 
     @property
     def role(self) -> Role:

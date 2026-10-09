@@ -284,9 +284,10 @@ def build_steps(case: str) -> list[Step]:
             title="Spend a simulation",
             intro=(
                 "Submitting sends the dispute and the four filings to the DecisionLayer simulator "
-                "and waits for the award. Each simulation counts against the monthly allowance, "
-                "so the command shows what it is about to send and confirms first. Next time, "
-                "leave off --dry-run and `simulate` does both halves in one go."
+                "and waits for the award. DecisionLayer publishes the award PDF at a public link "
+                "for 30 days, and each simulation counts against the monthly allowance (10 by "
+                "default), so the command shows what it is about to send and confirms first. "
+                "Next time, leave off --dry-run and `simulate` does both halves in one go."
             ),
             commands=(
                 Command(
