@@ -1,7 +1,7 @@
 # caseagent
 
 An agent that argues an arbitration, one filing at a time, and tests the result on
-the [DecisionLayer](https://staging.decisionlayer.ai) simulator.
+the [DecisionLayer](https://www.decisionlayer.ai) simulator.
 
 A case is a dispute (claim form, contract, exhibits) plus a *thread*: the filings made
 so far. The agent writes the next filing for whichever side is due, against the

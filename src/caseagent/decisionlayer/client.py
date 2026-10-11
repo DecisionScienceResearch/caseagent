@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .. import __version__
 
-DEFAULT_BASE_URL = "https://staging.decisionlayer.ai"
+DEFAULT_BASE_URL = "https://www.decisionlayer.ai"
 TEST_KEY_PREFIX = "dvarb_test_"
 LARGE_FILE_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 100 * 1024 * 1024
