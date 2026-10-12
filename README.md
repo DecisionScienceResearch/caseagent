@@ -267,3 +267,10 @@ The PDF link works for 30 days; the text stays. `caseagent doctor` says whether 
 account is approved to file cases (simulations, claiming and responding need no approval).
 
 Awards are AI-generated simulations and not legal advice; see DecisionLayer's terms.
+
+## License
+
+The code is MIT; see [LICENSE](LICENSE). The sample cases under `cases/` are licensed
+separately under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/); see
+[cases/LICENSE](cases/LICENSE). Adapted versions of them must be shared under the same
+license.

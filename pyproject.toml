@@ -3,8 +3,11 @@ name = "caseagent"
 version = "0.1.0"
 description = "An agent that composes arbitration filings (claim, answer, reply, response) and tests them against the DecisionLayer simulator."
 authors = [
-    { name = "Bill Ferrell", email = "wferrell@gmail.com" }
+    { name = "Bill Ferrell", email = "wferrell@gmail.com" },
+    { name = "Decision Science Research Corporation" },
 ]
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28.1",
